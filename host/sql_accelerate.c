@@ -12,11 +12,11 @@
 #include "utils/varlena.h"
 #include "funcapi.h"
 #include <string.h>
-//#include <stdbool.h>
 
 #define BLOCK_SZ (2*1024*1024)
 #define PAGE_SZ 8192    // 8K
 #define PAGES_PER_BLK (BLOCK_SZ/PAGE_SZ)   // 256
+#define NUM_ELEMENTS 149
 
 typedef struct ModFillState {
     int blk_num;
@@ -24,19 +24,20 @@ typedef struct ModFillState {
     int line_num;
 } ModFillState;
 
+float4 *input_array;
+float4 *arr_ptr;
+
 PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1( get_data );
 
 Datum get_data(PG_FUNCTION_ARGS);
-bool fill_block(Relation, unsigned char*, long*, ModFillState*, TupleDesc);
+bool fill_block(Relation, unsigned char*, unsigned*, ModFillState*, TupleDesc);
 int get_next_page(Relation, unsigned char*, ModFillState*, TupleDesc);
 
-TupleDesc tup_desc;
-
-
-// UDF Argument:
+// UDF Arguments:
 // ARGS[0] - Relation Name
+// ARGS[1] - number of tuples to process
 Datum get_data( PG_FUNCTION_ARGS )
 {
     // variable declarations
@@ -46,10 +47,17 @@ Datum get_data( PG_FUNCTION_ARGS )
     Relation rel;
     int num_blks;
     unsigned char *p_blk;
-    long num_tups;
+	unsigned num_tups;
     bool real_pages;
     ModFillState modFillState;
     TupleDesc tup_desc;
+    int i;
+    float4 sum;
+    float4 avg;
+
+	input_array = (float4 *)palloc(sizeof(float4) * NUM_ELEMENTS);
+	arr_ptr = input_array;
+	sum = 0;
 
     relname = PG_GETARG_TEXT_PP(0);
 
@@ -71,17 +79,37 @@ Datum get_data( PG_FUNCTION_ARGS )
     while(real_pages) {
         real_pages = fill_block(rel, p_blk, &num_tups, &modFillState, tup_desc);
     }
+    
+    // At this point, the input array has been filled and can be sent to fpga
+    
+    
+    //for (i = 0; i < NUM_ELEMENTS; ++i) {
+		//sum += input_array[i];
+		
+		//ereport(INFO,
+			//(errcode(ERRCODE_SUCCESSFUL_COMPLETION),
+			//errmsg("value: %f\n", input_array[i])));
+	//}
+	
+	//avg = sum / NUM_ELEMENTS;
+	
+	//ereport(INFO,
+			//(errcode(ERRCODE_SUCCESSFUL_COMPLETION),
+			//errmsg("average: %f\n", avg)));
 
     pfree(p_blk);
+    
+    pfree(input_array);
 
     relation_close(rel, AccessShareLock);
 
-    PG_RETURN_INT64(num_tups);
-    //PG_RETURN_INT64(count);
+    //PG_RETURN_INT32(num_tups);
+    
+    PG_RETURN_FLOAT4(avg);
 }
 
 // Routines for retreiving data from PG
-bool fill_block(Relation rel, unsigned char *p_buf, long *p_num_tups,
+bool fill_block(Relation rel, unsigned char *p_buf, unsigned *p_num_tups,
                 ModFillState *p_fill_state, TupleDesc tup_desc)
 {
     // variable declarations
@@ -149,11 +177,7 @@ int get_next_page(Relation rel, unsigned char *p_buf, ModFillState *p_fill_state
             HeapTupleData tmp_tup;
             Datum result;
             bool isnull;
-            text* value;
-            const char* c_value;
-            const char* cmp_string;
-            
-            cmp_string = "Houston";
+			//float4 value;
 
 			// get the id of current tuple
             id = PageGetItemId(page, line_num);
@@ -166,16 +190,12 @@ int get_next_page(Relation rel, unsigned char *p_buf, ModFillState *p_fill_state
             tmp_tup.t_tableOid = InvalidOid;
             tmp_tup.t_data = tup_hdr;
             
+			// get the value of the 4th field in the relation (returned as a Datum)
             result = heap_getattr(&tmp_tup, 4, tup_desc, &isnull);
-            value = (text *)DatumGetCString(result);
-            c_value = text_to_cstring(value);
-            
-            if (strstr(c_value, cmp_string)) {
-				ereport(INFO,
-					(errcode(ERRCODE_SUCCESSFUL_COMPLETION),
-					errmsg("value: %s\n", c_value)));
-			}
-            
+
+			// add the float value to our input array
+			*arr_ptr = (float4)DatumGetFloat4(result);
+			arr_ptr++;      
 
 			// user data (columns) begin at the offset indicated by t_hoff
             tuple_data_len = lp_len - tup_hdr->t_hoff;
