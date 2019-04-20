@@ -17,14 +17,12 @@
 #include <unistd.h>
 #include <sys/types.h> 
 #include <sys/socket.h> 
+#include <sys/time.h>
 #include <arpa/inet.h> 
 #include <netinet/in.h> 
 #include "sql_accelerate.h"
 
-#define NUM_ELEMENTS 				1024
-#define PACKET_SIZE 				512  //bytes
-#define NUM_ELEMENTS_PER_PACKET 	PACKET_SIZE / sizeof(float)
-#define NUM_PACKETS 				NUM_ELEMENTS / NUM_ELEMENTS_PER_PACKET
+#define NUM_ELEMENTS 				1048576
 #define PORT     					8080
 
 float4 *input_array;
@@ -36,7 +34,6 @@ PG_FUNCTION_INFO_V1( get_data );
 
 // UDF Arguments:
 // ARGS[0] - Relation Name
-// ARGS[1] - number of tuples to process
 Datum get_data( PG_FUNCTION_ARGS )
 {
     // variable declarations
@@ -44,15 +41,17 @@ Datum get_data( PG_FUNCTION_ARGS )
     List *names_list;
     RangeVar *rel_rv;
     Relation rel;
+    struct timeval time_start, time_end;
     int num_blks;
     unsigned char *p_blk;
 	unsigned num_tups;
     bool real_pages;
     ModFillState modFillState;
     TupleDesc tup_desc;
-    int i;
-    //float4 sum;
     float4 avg;
+    
+    // Start the timer
+    gettimeofday(&time_start, NULL);
 
 	input_array = (float4 *)palloc(sizeof(float4) * NUM_ELEMENTS);
 	arr_ptr = input_array;
@@ -80,38 +79,24 @@ Datum get_data( PG_FUNCTION_ARGS )
     
     // At this point, the input array has been filled and the data can be sent to fpga
     avg = client_send_data();
-    
-    ////sum = 0;
-    //for (i = 0; i < NUM_ELEMENTS; ++i) {
-		////sum += input_array[i];
-		
-		//ereport(INFO,
-			//(errcode(ERRCODE_SUCCESSFUL_COMPLETION),
-			//errmsg("value: %f\n", input_array[i])));
-	//}
-	
-	//avg = sum / NUM_ELEMENTS;
-	
-	//ereport(INFO,
-			//(errcode(ERRCODE_SUCCESSFUL_COMPLETION),
-			//errmsg("average: %f\n", avg)));
 
     pfree(p_blk);
     
     pfree(input_array);
 
     relation_close(rel, AccessShareLock);
-
-    //PG_RETURN_INT32(num_tups);
     
+    // End the timer and print execution time to the postgres console
+    gettimeofday(&time_end, NULL);
     ereport(INFO,
 		(errcode(ERRCODE_SUCCESSFUL_COMPLETION),
-		errmsg("num tuples: %d\n", num_tups)));
+		errmsg("C UDF execution time: %ld ms\n", 
+			((time_end.tv_sec * 1000000 + time_end.tv_usec) - (time_start.tv_sec * 1000000 + time_start.tv_usec)) / 1000)));
     
     PG_RETURN_FLOAT4(avg);
 }
 
-// Routines for retreiving data from PG
+// Routines for retreiving data from Postgres
 bool fill_block(Relation rel, unsigned char *p_buf, unsigned *p_num_tups,
                 ModFillState *p_fill_state, TupleDesc tup_desc)
 {
@@ -240,14 +225,8 @@ float client_send_data()
 	int sockfd;
 	char *server_ip = "192.168.2.7";
 	struct sockaddr_in server;
-
-	//float send_message;
 	float recv_message;
 	int sent_total, sent_now, mem_size;
-	
-	int i;
-	//int y;
-	//send_message = 10.5;
 
 	// Server information
     server.sin_family = AF_INET;
@@ -268,16 +247,8 @@ float client_send_data()
 	
 	sent_total = 0;
 	mem_size = NUM_ELEMENTS * sizeof(float);
-	
-	for (i = 0; i < NUM_ELEMENTS; ++i) {
-		//sum += input_array[i];
-		
-		ereport(INFO,
-			(errcode(ERRCODE_SUCCESSFUL_COMPLETION),
-			errmsg("value: %f\n", input_array[i])));
-	}
     
-	// send floating point values to the DE1-Soc
+	// send floating point values to the DE1-Soc over network
 	// I already know that both architectures are Little Endian so I will bypass the hton() call
 	for (sent_now = 0; sent_total < mem_size; sent_total += sent_now) {
 		
@@ -285,26 +256,17 @@ float client_send_data()
 		
 		ereport(INFO,
 			(errcode(ERRCODE_SUCCESSFUL_COMPLETION),
-			errmsg("just sent: %d\n", sent_now)));
+			errmsg("Bytes sent: %d\n", sent_now)));
 		
 		if (sent_now == -1) break;
 		
 	}
-
-    //if (send(sockfd, input_array, 128*sizeof(float), 0) < 0) {
-		//perror("Send()");
-        //exit(5);
-	//}
 	
 	// Receive message back from server
 	if (recv(sockfd, &recv_message, sizeof(float), 0) < 0) {
 		perror("Recv()");
         exit(6);
 	}
-    
-    ereport(INFO,
-			(errcode(ERRCODE_SUCCESSFUL_COMPLETION),
-			errmsg("Message from Server: %f\n", recv_message)));
   
     close(sockfd); 
     return recv_message;	
